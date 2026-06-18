@@ -5,3 +5,4 @@ ta-lib
 scikit-learn
 matplotlib
 streamlit
+pytz
