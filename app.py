@@ -6,6 +6,7 @@ import talib
 from itertools import combinations
 from sklearn.ensemble import RandomForestClassifier
 from datetime import datetime
+import pytz
 
 st.set_page_config(page_title="Escáner FOTSI", layout="wide")
 
@@ -103,7 +104,9 @@ def entrenar_modelos():
 
 # ── Título
 st.title("Escáner FOTSI + MACD")
-st.caption(f"Última actualización: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+import pytz
+zona = pytz.timezone("America/Cancun")
+st.caption(f"Última actualización: {datetime.now(zona).strftime('%d/%m/%Y %H:%M')}")
 
 # ── Entrenar modelos
 modelos, feature_cols = entrenar_modelos()
