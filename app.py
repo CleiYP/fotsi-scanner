@@ -3,10 +3,11 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import talib
+import time
+import pytz
 from itertools import combinations
 from sklearn.ensemble import RandomForestClassifier
 from datetime import datetime
-import pytz
 
 st.set_page_config(page_title="Escáner FOTSI", layout="wide")
 
@@ -21,6 +22,7 @@ PARES = [
 ]
 MONEDAS = ["EUR","USD","GBP","CHF","JPY","AUD","CAD","NZD"]
 L2, L3 = 25, 15
+ZONA = pytz.timezone("America/Cancun")
 
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -31,6 +33,28 @@ def tsi(momentum, l2, l3):
     s1a = ema(momentum.abs(), l2)
     s2a = ema(s1a, l3)
     return 100 * (s2 / s2a)
+
+def descargar_robusto(pares, period="2y", interval="1h"):
+    datos = yf.download(pares, period=period, interval=interval, group_by="ticker", progress=False)
+    pares_disp = list(datos.columns.get_level_values(0).unique())
+    pares_vacios = [p for p in pares_disp if datos[p]["Close"].notna().sum() < 100]
+
+    if pares_vacios:
+        dfs_individuales = {}
+        for par in pares_vacios:
+            time.sleep(3)
+            df_ind = yf.download(par, period=period, interval=interval, progress=False)
+            if len(df_ind) > 100:
+                dfs_individuales[par] = df_ind
+
+        columnas_buenas = {p: datos[p] for p in pares_disp if p not in dfs_individuales}
+        for par, df_ind in dfs_individuales.items():
+            if df_ind.columns.nlevels > 1:
+                df_ind.columns = df_ind.columns.droplevel(1)
+            columnas_buenas[par] = df_ind[["Open","High","Low","Close","Volume"]]
+        datos = pd.concat(columnas_buenas, axis=1)
+
+    return datos
 
 def calcular_fotsi(datos):
     mom = {}
@@ -66,62 +90,54 @@ def detectar_macd(par, intervalo="4h"):
         p10 = np.percentile(macd, 10)
         p90 = np.percentile(macd, 90)
         percentil = (val - p10) / (p90 - p10) * 100
-        sobreextendido = percentil > 80 or percentil < 20
-        direccion = "bajista" if percentil > 80 else ("alcista" if percentil < 20 else None)
-        return {"sobreextendido": sobreextendido, "direccion": direccion, "percentil": round(float(percentil), 1)}
+        direccion = "bajista" if percentil > 80 else ("alcista" if percentil < 20 else "neutral")
+        return {"percentil": round(float(percentil), 1), "direccion": direccion}
     except:
         return None
 
-@st.cache_resource(show_spinner="Entrenando modelos (solo la primera vez)...")
+@st.cache_resource(show_spinner="Entrenando modelos (solo la primera vez, ~10-15 min)...")
 def entrenar_modelos():
-    datos = yf.download(PARES, period="2y", interval="1h", group_by="ticker")
+    datos = descargar_robusto(PARES, period="2y", interval="1h")
     fotsi = calcular_fotsi(datos)
+
     distancias = pd.DataFrame(index=fotsi.index)
     for m1, m2 in combinations(MONEDAS, 2):
         distancias[f"{m1}_{m2}"] = fotsi[m1] - fotsi[m2]
+
     dataset = pd.DataFrame(index=fotsi.index)
     for moneda in MONEDAS:
         dataset[f"fotsi_{moneda}"] = fotsi[moneda]
     for col in distancias.columns:
-        dataset[f"dist_{col}"] = distancias[col]
-        dataset[f"vel3_{col}"] = distancias[col].diff(3)
-        dataset[f"vel5_{col}"] = distancias[col].diff(5)
+        dataset[f"dist_{col}"]  = distancias[col]
+        dataset[f"vel3_{col}"]  = distancias[col].diff(3)
+        dataset[f"vel5_{col}"]  = distancias[col].diff(5)
         dataset[f"vel10_{col}"] = distancias[col].diff(10)
-    for col in distancias.columns:
-        dataset[f"target_{col}"] = (distancias[col].shift(-3).abs() > distancias[col].abs()).astype(int)
+    for n in [1, 2, 3]:
+        for col in distancias.columns:
+            dist_futura = distancias[col].shift(-n)
+            dataset[f"target_{n}h_{col}"] = (dist_futura.abs() > distancias[col].abs()).astype(int)
+
     dataset.dropna(inplace=True)
     feature_cols = [c for c in dataset.columns if not c.startswith("target_")]
     target_cols  = [c for c in dataset.columns if c.startswith("target_")]
     split = int(len(dataset) * 0.8)
     X_train = dataset[feature_cols].iloc[:split]
+
     modelos = {}
     for target in target_cols:
-        par = target.replace("target_", "")
         m = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)
         m.fit(X_train, dataset[target].iloc[:split])
-        modelos[par] = m
+        modelos[target] = m
+
     return modelos, feature_cols
 
-# ── Título
-st.title("Escáner FOTSI + MACD")
-import pytz
-zona = pytz.timezone("America/Cancun")
-st.caption(f"Última actualización: {datetime.now(zona).strftime('%d/%m/%Y %H:%M')}")
-
-# ── Entrenar modelos
-modelos, feature_cols = entrenar_modelos()
-
-# ── Botón actualizar
-if st.button("🔄 Actualizar ranking"):
-    st.rerun()
-
-# ── Ranking FOTSI
-with st.spinner("Calculando ranking FOTSI..."):
-    datos_live = yf.download(PARES, period="5d", interval="1h", group_by="ticker", progress=False)
+def generar_tabla(modelos, feature_cols):
+    datos_live = descargar_robusto(PARES, period="5d", interval="1h")
     fotsi_live = calcular_fotsi(datos_live)
     dist_live = pd.DataFrame(index=fotsi_live.index)
     for m1, m2 in combinations(MONEDAS, 2):
         dist_live[f"{m1}_{m2}"] = fotsi_live[m1] - fotsi_live[m2]
+
     ultima = {}
     for moneda in MONEDAS:
         ultima[f"fotsi_{moneda}"] = fotsi_live[moneda].iloc[-1]
@@ -130,72 +146,48 @@ with st.spinner("Calculando ranking FOTSI..."):
         ultima[f"vel3_{col}"]  = dist_live[col].diff(3).iloc[-1]
         ultima[f"vel5_{col}"]  = dist_live[col].diff(5).iloc[-1]
         ultima[f"vel10_{col}"] = dist_live[col].diff(10).iloc[-1]
-    X_live = pd.DataFrame([ultima])[feature_cols]
-    res_live = {par: m.predict_proba(X_live)[0][1] for par, m in modelos.items()}
-    ranking_live = pd.Series(res_live).sort_values(ascending=False)
 
-# ── Capa 1
-st.subheader("📊 Capa 1 — FOTSI (próximas 3 velas H1)")
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown("**🔺 Divergencia**")
-    for par in ranking_live.head(3).index:
+    X_actual = pd.DataFrame([ultima])[feature_cols]
+
+    pares_unicos = sorted(set("_".join(t.replace("target_","").split("_")[1:]) for t in modelos.keys()))
+
+    filas = []
+    macd_cache = {}
+    for par in pares_unicos:
         m1, m2 = par.split("_")
-        st.metric(f"{m1}/{m2}", f"{ranking_live[par]*100:.1f}%")
-with col2:
-    st.markdown("**🔻 Convergencia**")
-    for par in ranking_live.tail(3).index:
-        m1, m2 = par.split("_")
-        st.metric(f"{m1}/{m2}", f"{(1-ranking_live[par])*100:.1f}%")
+        fila = {"Par": f"{m1}/{m2}"}
+        for h in ["1h", "2h", "3h"]:
+            modelo = modelos[f"target_{h}_{par}"]
+            prob = modelo.predict_proba(X_actual)[0][1]
+            fila[f"FOTSI {h.upper()}"] = f"Div {prob*100:.0f}%" if prob > 0.5 else f"Conv {(1-prob)*100:.0f}%"
 
-# ── Capa 2 y 3
-with st.spinner("Escaneando MACD..."):
-    macd_res = {}
-    for par in PARES:
-        nombre = f"{par[:3]}/{par[3:6]}"
-        macd_res[nombre] = {"4H": detectar_macd(par,"4h"), "1H": detectar_macd(par,"1h")}
+        ticker = f"{m1}{m2}=X"
+        if ticker not in PARES:
+            ticker = f"{m2}{m1}=X"
+        if ticker in PARES:
+            r4h = detectar_macd(ticker, "4h")
+            r1h = detectar_macd(ticker, "1h")
+            fila["MACD 4H"] = f"{r4h['percentil']}% {r4h['direccion']}" if r4h else "N/A"
+            fila["MACD 1H"] = f"{r1h['percentil']}% {r1h['direccion']}" if r1h else "N/A"
+        else:
+            fila["MACD 4H"] = "N/A"
+            fila["MACD 1H"] = "N/A"
 
-st.subheader("📈 Capa 2 — MACD 4H")
-col3, col4 = st.columns(2)
-with col3:
-    st.markdown("**Alcista**")
-    for p, r in macd_res.items():
-        if r["4H"] and r["4H"]["direccion"] == "alcista":
-            st.write(f"→ {p} ({r['4H']['percentil']}%)")
-with col4:
-    st.markdown("**Bajista**")
-    for p, r in macd_res.items():
-        if r["4H"] and r["4H"]["direccion"] == "bajista":
-            st.write(f"→ {p} ({r['4H']['percentil']}%)")
+        filas.append(fila)
 
-st.subheader("📉 Capa 3 — MACD 1H")
-col5, col6 = st.columns(2)
-with col5:
-    st.markdown("**Alcista**")
-    for p, r in macd_res.items():
-        if r["1H"] and r["1H"]["direccion"] == "alcista":
-            st.write(f"→ {p} ({r['1H']['percentil']}%)")
-with col6:
-    st.markdown("**Bajista**")
-    for p, r in macd_res.items():
-        if r["1H"] and r["1H"]["direccion"] == "bajista":
-            st.write(f"→ {p} ({r['1H']['percentil']}%)")
+    return pd.DataFrame(filas)
 
-# ── Confluencias
-st.subheader("⭐ Confluencias")
-fotsi_top = [f"{p.split('_')[0]}/{p.split('_')[1]}" for p in ranking_live.head(5).index]
-fotsi_bot = [f"{p.split('_')[0]}/{p.split('_')[1]}" for p in ranking_live.tail(5).index]
-encontrado = False
-for par, r in macd_res.items():
-    capas = []
-    if par in fotsi_top or par in fotsi_bot:
-        capas.append("FOTSI")
-    if r["4H"] and r["4H"]["sobreextendido"]:
-        capas.append("MACD 4H")
-    if r["1H"] and r["1H"]["sobreextendido"]:
-        capas.append("MACD 1H")
-    if len(capas) >= 2:
-        st.success(f"**{par}** — {' + '.join(capas)}")
-        encontrado = True
-if not encontrado:
-    st.info("No hay confluencias en este momento")
+# ── Interfaz ─────────────────────────────────────────
+st.title("Escáner FOTSI + MACD")
+
+modelos, feature_cols = entrenar_modelos()
+
+st.caption(f"Última actualización: {datetime.now(ZONA).strftime('%d/%m/%Y %H:%M')}")
+
+if st.button("🔄 Actualizar tabla"):
+    st.rerun()
+
+with st.spinner("Calculando tabla..."):
+    tabla = generar_tabla(modelos, feature_cols)
+
+st.dataframe(tabla, use_container_width=True, hide_index=True)
