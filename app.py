@@ -34,7 +34,7 @@ def tsi(momentum, l2, l3):
     s2a = ema(s1a, l3)
     return 100 * (s2 / s2a)
 
-def descargar_robusto(pares, period="2y", interval="1h"):
+def descargar_robusto(pares, period="1y", interval="1h"):
     datos = yf.download(pares, period=period, interval=interval, group_by="ticker", progress=False)
     pares_disp = list(datos.columns.get_level_values(0).unique())
     pares_vacios = [p for p in pares_disp if datos[p]["Close"].notna().sum() < 100]
@@ -125,7 +125,7 @@ def entrenar_modelos():
 
     modelos = {}
     for target in target_cols:
-        m = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)
+        m = RandomForestClassifier(n_estimators=80, random_state=42, n_jobs=-1, max_depth=10)
         m.fit(X_train, dataset[target].iloc[:split])
         modelos[target] = m
 
