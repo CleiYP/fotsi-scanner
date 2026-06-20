@@ -137,7 +137,6 @@ def generar_tabla(modelos, feature_cols):
     dist_live = pd.DataFrame(index=fotsi_live.index)
     for m1, m2 in combinations(MONEDAS, 2):
         dist_live[f"{m1}_{m2}"] = fotsi_live[m1] - fotsi_live[m2]
-
     ultima = {}
     for moneda in MONEDAS:
         ultima[f"fotsi_{moneda}"] = fotsi_live[moneda].iloc[-1]
@@ -146,11 +145,8 @@ def generar_tabla(modelos, feature_cols):
         ultima[f"vel3_{col}"]  = dist_live[col].diff(3).iloc[-1]
         ultima[f"vel5_{col}"]  = dist_live[col].diff(5).iloc[-1]
         ultima[f"vel10_{col}"] = dist_live[col].diff(10).iloc[-1]
-
     X_actual = pd.DataFrame([ultima])[feature_cols]
-
     pares_unicos = sorted(set("_".join(t.replace("target_","").split("_")[1:]) for t in modelos.keys()))
-
     filas = []
     macd_cache = {}
     for par in pares_unicos:
@@ -159,24 +155,22 @@ def generar_tabla(modelos, feature_cols):
         for h in ["1h", "2h", "3h"]:
             modelo = modelos[f"target_{h}_{par}"]
             prob = modelo.predict_proba(X_actual)[0][1]
-            fila[f"FOTSI {h.upper()}"] = f"Div {prob*100:.0f}%" if prob > 0.5 else f"Conv {(1-prob)*100:.0f}%"
-
+            valor = prob * 100 if prob > 0.5 else -(1 - prob) * 100
+            fila[f"FOTSI {h.upper()}"] = round(valor, 1)
         ticker = f"{m1}{m2}=X"
         if ticker not in PARES:
             ticker = f"{m2}{m1}=X"
         if ticker in PARES:
             r4h = detectar_macd(ticker, "4h")
             r1h = detectar_macd(ticker, "1h")
-            fila["MACD 4H"] = f"{r4h['percentil']}% {r4h['direccion']}" if r4h else "N/A"
-            fila["MACD 1H"] = f"{r1h['percentil']}% {r1h['direccion']}" if r1h else "N/A"
+            fila["MACD 4H"] = r4h["percentil"] if r4h else None
+            fila["MACD 1H"] = r1h["percentil"] if r1h else None
         else:
-            fila["MACD 4H"] = "N/A"
-            fila["MACD 1H"] = "N/A"
-
+            fila["MACD 4H"] = None
+            fila["MACD 1H"] = None
         filas.append(fila)
-
     return pd.DataFrame(filas)
-
+    
 # ── Interfaz ─────────────────────────────────────────
 st.title("Escáner FOTSI + MACD")
 
